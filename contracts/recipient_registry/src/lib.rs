@@ -1,22 +1,47 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, vec, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
+
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey {
+    Admin,
+    Recipient(Address),
+}
 
 #[contract]
-pub struct Contract;
+pub struct RecipientRegistryContract;
 
-// This is a sample contract. Replace this placeholder with your own contract logic.
-// A corresponding test example is available in `test.rs`.
-//
-// For comprehensive examples, visit <https://github.com/stellar/soroban-examples>.
-// The repository includes use cases for the Stellar ecosystem, such as data storage on
-// the blockchain, token swaps, liquidity pools, and more.
-//
-// Refer to the official documentation:
-// <https://developers.stellar.org/docs/build/smart-contracts/overview>.
 #[contractimpl]
-impl Contract {
-    pub fn hello(env: Env, to: String) -> Vec<String> {
-        vec![&env, String::from_str(&env, "Hello"), to]
+impl RecipientRegistryContract {
+    pub fn initialize(env: Env, admin: Address) {
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic!("already initialized");
+        }
+        env.storage().instance().set(&DataKey::Admin, &admin);
+    }
+
+    pub fn get_admin(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::Admin).expect("not initialized")
+    }
+
+    pub fn whitelist_recipient(env: Env, target: Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        admin.require_auth();
+
+        env.storage().persistent().set(&DataKey::Recipient(target.clone()), &true);
+
+        env.events().publish((Symbol::short("reg_ngo"),), target);
+    }
+
+    pub fn remove_recipient(env: Env, target: Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        admin.require_auth();
+
+        env.storage().persistent().set(&DataKey::Recipient(target), &false);
+    }
+
+    pub fn validate_recipient(env: Env, target: Address) -> bool {
+        env.storage().persistent().get(&DataKey::Recipient(target)).unwrap_or(false)
     }
 }
 
