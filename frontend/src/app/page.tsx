@@ -1,7 +1,9 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import useSWR from 'swr';
 import { formatStellarAddress, isValidStellarAddress } from '../utils/math';
+import { getStellarWalletsKit } from '../utils/wallet';
 import {
   initialUIState,
   handleLoadComplete,
@@ -32,6 +34,12 @@ export default function Home() {
   // App UI State
   const [ui, setUi] = useState<UIState>(initialUIState);
 
+  // Stellar Wallet Connect States
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [walletType, setWalletType] = useState<string | null>(null);
+  const [simulateUserReject, setSimulateUserReject] = useState<boolean>(false);
+  const [simulateRPCTimeout, setSimulateRPCTimeout] = useState<boolean>(false);
+
   // App simulated states matching the Rust contract configurations
   const [adminAddress] = useState<string>('GDCONDUITADMINXXYTWENTYTWOSIXMARKETINGVAULTXX55566677722');
   const [registryContractId, setRegistryContractId] = useState<string>('CCDMRCGEXGRMM2JYED27C7S62UKISLXXTMRNKXRBFNVSANB7QGX4ZVDV');
@@ -39,9 +47,10 @@ export default function Home() {
   const [campaignName, setCampaignName] = useState<string>('Global Clean Water Initiative');
   const [campaignActive, setCampaignActive] = useState<boolean>(true);
   
-  // Vault Pools
+  // Vault Pools & Counter Centerpiece
   const [vaultBalance, setVaultBalance] = useState<number>(125000);
   const [totalDisbursed, setTotalDisbursed] = useState<number>(45000);
+  const [stroopsRouted, setStroopsRouted] = useState<number>(450000000000); // Live metric centerpiece
   
   // Interactive whitelisted NGOs list
   const [ngos, setNgos] = useState<WhitelistedNGO[]>([
@@ -73,6 +82,59 @@ export default function Home() {
     { id: '3', timestamp: '2026-07-11 10:30:10', type: 'DEPOSIT', status: 'SUCCESS', details: 'Deposited 25,000 USDC into Aid Router donor pool.', txHash: 'SorobanTx_0x9a8b...f7e6' },
   ]);
 
+  // Custom SWR event fetcher targeting testnet RPC endpoint
+  const rpcEventsFetcher = async (url: string) => {
+    // If user triggers simulated RPC timeout, fail intentionally to show failsafe retries
+    if (simulateRPCTimeout) {
+      throw new Error('RPCTimeout: Testnet RPC request timed out. Retrying automatically...');
+    }
+    
+    // Perform standard RPC POST request structure
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getEvents',
+        params: {
+          startLedger: 4500000,
+          filters: [
+            {
+              type: 'contract',
+              contractIds: [registryContractId],
+            },
+          ],
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error('RPCError: Failed to fetch on-chain events from Stellar Testnet.');
+    }
+    return response.json();
+  };
+
+  // SWR Event Polling Loop (polls every 6 seconds)
+  const { data: rpcData, error: rpcError } = useSWR(
+    'https://soroban-testnet.stellar.org',
+    rpcEventsFetcher,
+    {
+      refreshInterval: 6000,
+      dedupingInterval: 6000,
+      errorRetryCount: 99,
+      errorRetryInterval: 2500,
+    }
+  );
+
+  // Trigger SWR error notifications / auto retry states
+  useEffect(() => {
+    if (rpcError) {
+      setUi((prev) => handleFailedTransaction(prev, rpcError.message || 'RPC Connection Timeout.'));
+      addTerminalLog(`[RPC WARNING] Connection timed out. Auto-retry mechanism engaged...`);
+    }
+  }, [rpcError]);
+
   // Simulate initial loading skeleton polling
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -96,10 +158,49 @@ export default function Home() {
     setTerminalLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${line}`]);
   };
 
+  // Connect wallet method via StellarWalletsKit
+  const handleConnectWallet = async () => {
+    try {
+      const kit = await getStellarWalletsKit();
+      if (!kit) return;
+
+      setUi((prev) => handleClearToast(prev));
+      const res = await kit.authModal();
+      const address = res.address;
+      
+      // Successfully connect and set address
+      setWalletAddress(address);
+      setWalletType('Stellar Extension');
+      setUi((prev) => handleSuccessfulTransaction(prev, `Connected to wallet successfully!`));
+      addTerminalLog(`WalletConnected: Connected via kit. Address: ${address.substring(0, 10)}...`);
+    } catch (err: any) {
+      // Failsafe state 1: Wallet software missing/disconnected trigger simulation
+      if (err.message && (err.message.includes('missing') || err.message.includes('not found'))) {
+        setUi((prev) => handleFailedTransaction(prev, 'WalletMissing: Stellar wallet extension software is missing or disconnected.'));
+      } else {
+        setUi((prev) => handleFailedTransaction(prev, 'UserCancelled: Wallet connection request was cancelled by user.'));
+      }
+    }
+  };
+
+  // Disconnect wallet
+  const handleDisconnectWallet = () => {
+    setWalletAddress(null);
+    setWalletType(null);
+    setUi((prev) => handleSuccessfulTransaction(prev, 'Wallet disconnected successfully.'));
+    addTerminalLog('WalletDisconnected: User closed the active wallet session.');
+  };
+
   // Deposit funds into router donor pool
   const handleDeposit = (e: React.FormEvent) => {
     e.preventDefault();
     if (depositAmount <= 0) return;
+
+    // Failsafe check: Wallet connection required to mint/deposit
+    if (!walletAddress) {
+      setUi((prev) => handleFailedTransaction(prev, 'WalletDisconnected: You must connect your Stellar wallet before executing transactions.'));
+      return;
+    }
     
     setVaultBalance((prev) => prev + depositAmount);
     
@@ -121,6 +222,12 @@ export default function Home() {
   // Add NGO to Whitelist Registry
   const handleWhitelist = (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!walletAddress) {
+      setUi((prev) => handleFailedTransaction(prev, 'WalletDisconnected: Whitelisting actions require an active admin wallet session.'));
+      return;
+    }
+
     if (!newNGOAddress || !newNGOName) {
       setUi((prev) => handleFailedTransaction(prev, 'Whitelist failed - NGO address and name are required.'));
       return;
@@ -167,6 +274,11 @@ export default function Home() {
 
   // Remove NGO from Whitelist Registry
   const handleRemoveWhitelist = (address: string, name: string) => {
+    if (!walletAddress) {
+      setUi((prev) => handleFailedTransaction(prev, 'WalletDisconnected: Admin wallet connection is required to modify whitelisted registries.'));
+      return;
+    }
+
     setNgos((prev) => prev.filter((ngo) => ngo.address !== address));
     
     const newLog: AuditLog = {
@@ -189,49 +301,23 @@ export default function Home() {
     
     addTerminalLog(`[INVOCATION] aid_router.disburse_aid(target_ngo=${disburseNGOAddress.substring(0, 8)}..., amount=${disburseAmount} USDC) started.`);
     
-    // 1. Check campaign status
-    if (!campaignActive) {
-      const err = 'CampaignInactive: Campaign configuration is currently paused by admin.';
-      addTerminalLog(`EXECUTION ERROR: ${err} Disbursement rejected.`);
-      setUi((prev) => handleFailedTransaction(prev, err));
-      
-      setAuditLogs((prev) => [{
-        id: Date.now().toString(),
-        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-        type: 'DISBURSE',
-        status: 'FAILED',
-        details: `Disbursement of ${disburseAmount} USDC failed: Campaign Inactive.`,
-        txHash: 'None'
-      }, ...prev]);
+    // Failsafe check 1: Wallet connected check
+    if (!walletAddress) {
+      setUi((prev) => handleFailedTransaction(prev, 'WalletDisconnected: Connect your wallet prior to signing the disbursement transaction.'));
       return;
     }
 
-    // 2. Query registry (Cross-Contract call check)
-    const targetNGO = ngos.find((n) => n.address === disburseNGOAddress);
-    
-    addTerminalLog(`Cross-Contract Call: env.invoke_contract::<bool>(&registry_contract_id, validate_recipient, [${disburseNGOAddress.substring(0, 8)}...]) triggered.`);
-    
-    if (!targetNGO || targetNGO.status !== 'Verified') {
-      const err = 'UnverifiedRecipient: Recipient is not verified in the whitelisting registry database.';
-      addTerminalLog(`EXECUTION ERROR: ${err} Reverted.`);
+    // Failsafe check 2: User rejected signature trigger
+    if (simulateUserReject) {
+      const err = 'UserRejectedSignature: Transaction signature was explicitly rejected in the Freighter browser extension.';
+      addTerminalLog(`[SIGNATURE REJECTED] User cancelled Freighter auth request.`);
       setUi((prev) => handleFailedTransaction(prev, err));
-      
-      setAuditLogs((prev) => [{
-        id: Date.now().toString(),
-        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-        type: 'DISBURSE',
-        status: 'FAILED',
-        details: `Disbursement of ${disburseAmount} USDC failed: Unverified Recipient.`,
-        txHash: 'None'
-      }, ...prev]);
       return;
     }
 
-    addTerminalLog('Cross-Contract Call returned TRUE: Recipient is verified.');
-
-    // 3. Check router vault balance
+    // Failsafe check 3: Insufficient asset balance check
     if (disburseAmount > vaultBalance) {
-      const err = `InsufficientFunds: Vault balance (${vaultBalance} USDC) is less than requested amount (${disburseAmount} USDC).`;
+      const err = `InsufficientBalance: Connected wallet balance (${vaultBalance} USDC) is less than requested amount (${disburseAmount} USDC).`;
       addTerminalLog(`EXECUTION ERROR: ${err} Reverted.`);
       setUi((prev) => handleFailedTransaction(prev, err));
       
@@ -246,9 +332,46 @@ export default function Home() {
       return;
     }
 
-    // 4. Update balances
+    // Failsafe check 4: Contract error configs (e.g. Campaign Inactive or Unverified)
+    if (!campaignActive) {
+      const err = 'ContractError::CampaignInactive: Campaign configuration is currently paused by admin.';
+      addTerminalLog(`EXECUTION ERROR: ${err} Disbursement rejected.`);
+      setUi((prev) => handleFailedTransaction(prev, err));
+      
+      setAuditLogs((prev) => [{
+        id: Date.now().toString(),
+        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+        type: 'DISBURSE',
+        status: 'FAILED',
+        details: `Disbursement of ${disburseAmount} USDC failed: Campaign Inactive.`,
+        txHash: 'None'
+      }, ...prev]);
+      return;
+    }
+
+    const targetNGO = ngos.find((n) => n.address === disburseNGOAddress);
+    
+    if (!targetNGO || targetNGO.status !== 'Verified') {
+      const err = 'ContractError::UnverifiedRecipient: Recipient is not registered or verified in the Recipient Registry contract.';
+      addTerminalLog(`EXECUTION ERROR: ${err} Reverted.`);
+      setUi((prev) => handleFailedTransaction(prev, err));
+      
+      setAuditLogs((prev) => [{
+        id: Date.now().toString(),
+        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+        type: 'DISBURSE',
+        status: 'FAILED',
+        details: `Disbursement of ${disburseAmount} USDC failed: Unverified Recipient.`,
+        txHash: 'None'
+      }, ...prev]);
+      return;
+    }
+
+    // 4. Update balances & counter centerpiece
     setVaultBalance((prev) => prev - disburseAmount);
     setTotalDisbursed((prev) => prev + disburseAmount);
+    // 1 USDC = 10,000,000 Stroops. Add disbursement amount to global counter.
+    setStroopsRouted((prev) => prev + (disburseAmount * 10_000_000));
     
     // 5. Success and Event Emission
     const txHash = `SorobanTx_0x${Math.random().toString(16).substring(2, 10)}...${Math.random().toString(16).substring(2, 6)}`;
@@ -257,7 +380,7 @@ export default function Home() {
     addTerminalLog(`Emitted event: disburse(recipient=${disburseNGOAddress.substring(0, 8)}..., amount=${disburseAmount}, timestamp=${Math.floor(Date.now() / 1000)})`);
     addTerminalLog(`Transaction confirmed. Hash: ${txHash}`);
 
-    const msg = `Routed ${disburseAmount.toLocaleString()} USDC to whitelisted NGO: "${targetNGO.name}"`;
+    const msg = `Routed ${disburseAmount.toLocaleString()} USDC (${(disburseAmount * 10_000_000).toLocaleString()} Stroops) to whitelisted NGO: "${targetNGO.name}"`;
     setUi((prev) => handleSuccessfulTransaction(prev, msg));
 
     const newLog: AuditLog = {
@@ -274,6 +397,11 @@ export default function Home() {
 
   // Toggle active campaign configuration
   const handleToggleCampaign = () => {
+    if (!walletAddress) {
+      setUi((prev) => handleFailedTransaction(prev, 'WalletDisconnected: Admin wallet connection is required to modify campaign states.'));
+      return;
+    }
+
     const nextState = !campaignActive;
     setCampaignActive(nextState);
     
@@ -292,27 +420,30 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-[#07070a] text-zinc-100 font-sans selection:bg-indigo-500 selection:text-white pb-16 relative">
+    <div className="min-h-screen bg-[#09090b] text-zinc-100 font-sans selection:bg-indigo-600 selection:text-white pb-16 relative">
       
-      {/* Background Orbs */}
-      <div className="absolute top-0 left-0 w-full h-[600px] bg-gradient-to-b from-indigo-950/20 via-transparent to-transparent pointer-events-none" />
-      <div className="absolute top-12 left-1/4 w-[300px] h-[300px] bg-indigo-500/10 rounded-full blur-[120px] pointer-events-none" />
-      <div className="absolute top-48 right-1/4 w-[400px] h-[400px] bg-violet-600/10 rounded-full blur-[150px] pointer-events-none" />
+      {/* Top Border Line Accent */}
+      <div className="h-1 w-full bg-gradient-to-r from-indigo-500 via-violet-500 to-pink-500" />
 
       {/* Reactive Toast Notification Box */}
       {ui.toast && (
         <div 
           id="toast-notification"
-          className={`fixed top-6 right-6 z-50 flex items-center gap-3 px-4 py-3.5 rounded-xl border shadow-2xl backdrop-blur-md transition-all duration-300 animate-slide-in ${
+          className={`fixed top-6 right-6 z-50 flex items-center gap-3 px-4 py-3.5 rounded-lg border shadow-2xl transition-all duration-300 ${
             ui.toast.type === 'success'
-              ? 'bg-emerald-950/80 border-emerald-500/40 text-emerald-300'
-              : 'bg-rose-950/80 border-rose-500/40 text-rose-300'
+              ? 'bg-zinc-900 border-emerald-500/50 text-emerald-400'
+              : 'bg-zinc-900 border-rose-500/50 text-rose-400'
           }`}
         >
-          <span className="text-sm font-semibold">{ui.toast.message}</span>
+          <div className="flex flex-col gap-0.5 max-w-sm">
+            <span className="text-xs font-bold uppercase font-mono tracking-wider opacity-75">
+              {ui.toast.type === 'success' ? '✓ Operation Confirmed' : '⚠ Exception Triggered'}
+            </span>
+            <span className="text-xs leading-relaxed">{ui.toast.message}</span>
+          </div>
           <button 
             onClick={() => setUi(handleClearToast)}
-            className="text-xs opacity-75 hover:opacity-100 bg-black/20 hover:bg-black/40 h-5 w-5 rounded-full flex items-center justify-center font-bold"
+            className="text-xs opacity-75 hover:opacity-100 bg-zinc-800 hover:bg-zinc-700 h-5 w-5 rounded flex items-center justify-center font-bold font-mono"
           >
             ×
           </button>
@@ -320,454 +451,438 @@ export default function Home() {
       )}
 
       {/* Header */}
-      <header className="relative border-b border-zinc-800/80 bg-zinc-950/60 backdrop-blur-md px-6 py-4 flex items-center justify-between">
+      <header className="border-b border-zinc-800/80 bg-zinc-900/50 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-600 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">
+          <div className="h-8 w-8 rounded bg-indigo-600 flex items-center justify-center font-black text-sm text-white tracking-widest">
             C
           </div>
           <div>
-            <h1 className="text-xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-zinc-50 via-zinc-100 to-indigo-400">
+            <h1 className="text-md font-extrabold tracking-widest text-zinc-50">
               CONDUIT
             </h1>
-            <p className="text-xs text-zinc-500 font-mono">Programmatic Micro-Aid Router</p>
+            <p className="text-[10px] text-zinc-500 font-mono">Programmatic Micro-Aid Router</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-6">
-          <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs">
-            <span className="font-mono text-zinc-400">Active Admin:</span>
-            <span className="font-mono text-indigo-400 font-semibold">{formatStellarAddress(adminAddress)}</span>
-          </div>
-
-          <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs px-3 py-1.5 rounded-full font-medium">
-            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-            SOROBAN LOCAL SIMULATION
-          </div>
+        <div className="flex items-center gap-4">
+          {walletAddress ? (
+            <div className="flex items-center gap-3">
+              <div className="hidden sm:flex flex-col text-right">
+                <span className="text-[10px] text-zinc-500 font-mono uppercase">Wallet Connected ({walletType})</span>
+                <span className="text-xs font-mono text-indigo-400 font-medium">{formatStellarAddress(walletAddress)}</span>
+              </div>
+              <button 
+                onClick={handleDisconnectWallet}
+                className="bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-300 text-xs px-4 py-2 rounded font-semibold transition-colors"
+              >
+                Disconnect
+              </button>
+            </div>
+          ) : (
+            <button 
+              onClick={handleConnectWallet}
+              className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-4 py-2 rounded font-semibold transition-colors flex items-center gap-1.5 font-mono"
+            >
+              Connect Stellar Wallet
+            </button>
+          )}
         </div>
       </header>
 
       {/* Loading Skeleton Logic */}
       {ui.isLoading ? (
         <main className="max-w-7xl mx-auto px-6 mt-8 space-y-8 animate-pulse" id="loading-skeleton">
-          {/* Skeleton Metrics */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="h-32 rounded-2xl bg-zinc-900/60 border border-zinc-800/80" />
-            ))}
-          </div>
+          {/* Skeleton Header centerpiece */}
+          <div className="h-32 rounded-lg bg-zinc-900/60 border border-zinc-800/80" />
           {/* Skeleton Panels */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             <div className="lg:col-span-2 space-y-8">
-              <div className="h-96 rounded-2xl bg-zinc-900/40 border border-zinc-800/70" />
-              <div className="h-64 rounded-2xl bg-zinc-900/40 border border-zinc-800/70" />
+              <div className="h-64 rounded-lg bg-zinc-900/60 border border-zinc-800/80" />
+              <div className="h-96 rounded-lg bg-zinc-900/60 border border-zinc-800/80" />
             </div>
-            <div className="h-[500px] rounded-2xl bg-zinc-900/40 border border-zinc-800/70" />
+            <div className="h-[550px] rounded-lg bg-zinc-900/60 border border-zinc-800/80" />
           </div>
         </main>
       ) : (
-        <main className="relative max-w-7xl mx-auto px-6 mt-8 grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <main className="max-w-7xl mx-auto px-6 mt-8 space-y-8">
           
-          {/* Left Columns - Configuration & Pools */}
-          <div className="lg:col-span-2 flex flex-col gap-8">
+          {/* Live Global Ledger Counter centerpiece */}
+          <section className="p-8 rounded-lg bg-zinc-900/30 border border-zinc-800 flex flex-col sm:flex-row items-center justify-between gap-6 shadow-sm">
+            <div>
+              <p className="text-[10px] text-indigo-400 font-bold tracking-wider uppercase font-mono">Real-Time Ledger Counter</p>
+              <h2 className="text-4xl sm:text-5xl font-black text-zinc-50 font-mono tracking-tight mt-1 animate-pulse">
+                {stroopsRouted.toLocaleString()} <span className="text-lg font-bold text-zinc-500">Stroops</span>
+              </h2>
+              <p className="text-xs text-zinc-400 mt-1">Stroops Routed Globally to verified field recipients via Stellar Soroban contracts.</p>
+            </div>
+            <div className="flex gap-4 sm:border-l border-zinc-800 sm:pl-8 py-2 w-full sm:w-auto shrink-0 justify-between">
+              <div>
+                <span className="text-[10px] text-zinc-500 font-mono uppercase block">Active Campaign</span>
+                <span className="text-sm font-bold text-zinc-200">{campaignName}</span>
+              </div>
+              <div className="text-right sm:text-left">
+                <span className="text-[10px] text-zinc-500 font-mono uppercase block">Total Disbursed</span>
+                <span className="text-sm font-bold font-mono text-zinc-200">{totalDisbursed.toLocaleString()} USDC</span>
+              </div>
+            </div>
+          </section>
+
+          {/* Controls and Terminal logs */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             
-            {/* Custom Alert Boundary Component */}
-            {ui.alertMessage && (
-              <div 
-                id="alert-boundary"
-                className="p-4 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-300 flex items-start gap-3 shadow-lg animate-shake"
-              >
-                <svg className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                </svg>
-                <div>
-                  <h4 className="font-bold text-sm">Contract Execution Exception</h4>
-                  <p className="text-xs opacity-90 mt-1">{ui.alertMessage}</p>
-                </div>
-              </div>
-            )}
-
-            {/* Metrics Panel */}
-            <section className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+            {/* Left Content Column */}
+            <div className="lg:col-span-2 flex flex-col gap-8">
               
-              <div className="p-6 rounded-2xl bg-zinc-900/50 backdrop-blur-md border border-zinc-800/60 shadow-xl flex flex-col justify-between">
-                <div>
-                  <p className="text-xs text-zinc-400 font-semibold tracking-wider uppercase font-mono">Donor Pool Vault Balance</p>
-                  <h3 className="text-3xl font-extrabold mt-2 text-zinc-50 font-mono">
-                    {vaultBalance.toLocaleString()} <span className="text-sm font-semibold text-zinc-500">USDC</span>
-                  </h3>
-                </div>
-                <div className="mt-4 flex items-center gap-1.5 text-xs text-zinc-400">
-                  <span className="text-indigo-400">Asset SAC ID:</span>
-                  <span className="font-mono text-zinc-500">{formatStellarAddress(assetTokenId)}</span>
-                </div>
-              </div>
-
-              <div className="p-6 rounded-2xl bg-zinc-900/50 backdrop-blur-md border border-zinc-800/60 shadow-xl flex flex-col justify-between">
-                <div>
-                  <p className="text-xs text-zinc-400 font-semibold tracking-wider uppercase font-mono">Total Aid Disbursed</p>
-                  <h3 className="text-3xl font-extrabold mt-2 text-zinc-50 font-mono">
-                    {totalDisbursed.toLocaleString()} <span className="text-sm font-semibold text-zinc-500">USDC</span>
-                  </h3>
-                </div>
-                <div className="mt-4 flex items-center gap-1.5 text-xs text-emerald-400 font-medium">
-                  ✓ 100% Whitelisted NGOs Routed
-                </div>
-              </div>
-
-              <div className="p-6 rounded-2xl bg-zinc-900/50 backdrop-blur-md border border-zinc-800/60 shadow-xl flex flex-col justify-between">
-                <div>
-                  <p className="text-xs text-zinc-400 font-semibold tracking-wider uppercase font-mono">Active Whitelisted NGOs</p>
-                  <h3 className="text-3xl font-extrabold mt-2 text-zinc-50 font-mono">
-                    {ngos.length} <span className="text-sm font-semibold text-zinc-500">Verified</span>
-                  </h3>
-                </div>
-                <div className="mt-4 flex items-center gap-1.5 text-xs text-zinc-400">
-                  <span className="text-violet-400 font-semibold">Registry ID:</span>
-                  <span className="font-mono text-zinc-500">{formatStellarAddress(registryContractId)}</span>
-                </div>
-              </div>
-
-            </section>
-
-            {/* Campaign Configuration & Pool Deposit */}
-            <section className="grid grid-cols-1 md:grid-cols-2 gap-8">
-              
-              {/* Campaign Config Card */}
-              <div className="p-6 rounded-2xl bg-zinc-900/40 border border-zinc-800/70 shadow-lg flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-                    <h3 className="font-bold text-zinc-100 flex items-center gap-2">
-                      <svg className="w-5 h-5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
-                      </svg>
-                      Router Configuration
-                    </h3>
-                    <button 
-                      onClick={handleToggleCampaign}
-                      className={`px-3 py-1 rounded-full text-xs font-bold transition-all duration-200 ${
-                        campaignActive 
-                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' 
-                          : 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
-                      }`}
-                    >
-                      {campaignActive ? 'Campaign Active' : 'Campaign Paused'}
-                    </button>
-                  </div>
-
-                  <div className="mt-4 flex flex-col gap-4 text-sm">
-                    <div>
-                      <label className="text-xs text-zinc-400 font-mono block">Campaign Name</label>
-                      <input 
-                        type="text" 
-                        value={campaignName} 
-                        onChange={(e) => setCampaignName(e.target.value)}
-                        className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-lg py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-200 font-sans font-medium"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs text-zinc-400 font-mono block">Registry Contract Address</label>
-                      <input 
-                        type="text" 
-                        value={registryContractId} 
-                        onChange={(e) => setRegistryContractId(e.target.value)}
-                        className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-lg py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-300 font-mono text-[11px]"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs text-zinc-400 font-mono block">USDC Token SAC Wrapper</label>
-                      <input 
-                        type="text" 
-                        value={assetTokenId} 
-                        onChange={(e) => setAssetTokenId(e.target.value)}
-                        className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-lg py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-300 font-mono text-[11px]"
-                      />
-                    </div>
+              {/* Custom Alert Boundary Component */}
+              {ui.alertMessage && (
+                <div 
+                  id="alert-boundary"
+                  className="p-4 rounded bg-rose-950/20 border border-rose-500/30 text-rose-300 flex items-start gap-3 shadow-md"
+                >
+                  <svg className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <div>
+                    <h4 className="font-bold text-xs uppercase font-mono tracking-wide">On-chain VM Exception Triggered</h4>
+                    <p className="text-xs opacity-90 mt-1">{ui.alertMessage}</p>
                   </div>
                 </div>
+              )}
 
-                <div className="mt-6 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-xs text-zinc-500">
-                  <span>Auth: admin.require_auth</span>
-                  <span>Config locked on-chain</span>
+              {/* Failsafe Mock Toggles */}
+              <div className="p-4 rounded bg-zinc-900/30 border border-zinc-800 flex flex-wrap gap-6 items-center justify-between text-xs text-zinc-400">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold font-mono text-zinc-500 uppercase">Interactive Sandbox Controls:</span>
+                </div>
+                <div className="flex gap-6">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      checked={simulateUserReject} 
+                      onChange={(e) => setSimulateUserReject(e.target.checked)}
+                      className="rounded bg-zinc-950 border-zinc-800 text-indigo-600 focus:ring-0"
+                    />
+                    <span>Mock Freighter Reject Signature</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      checked={simulateRPCTimeout} 
+                      onChange={(e) => setSimulateRPCTimeout(e.target.checked)}
+                      className="rounded bg-zinc-950 border-zinc-800 text-indigo-600 focus:ring-0"
+                    />
+                    <span>Mock Network RPC Timeout</span>
+                  </label>
                 </div>
               </div>
 
-              {/* Donor Pool Deposit Form */}
-              <div className="p-6 rounded-2xl bg-zinc-900/40 border border-zinc-800/70 shadow-lg flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center border-b border-zinc-800 pb-3">
-                    <h3 className="font-bold text-zinc-100 flex items-center gap-2">
-                      <svg className="w-5 h-5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      Deposit Donor Capital
-                    </h3>
-                  </div>
+              {/* Operations Panel */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                
+                {/* Router Config */}
+                <div className="p-6 rounded bg-zinc-900/20 border border-zinc-800 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+                      <h3 className="font-bold text-sm text-zinc-100 flex items-center gap-2 uppercase tracking-wider font-mono">
+                        Vault Configuration
+                      </h3>
+                      <button 
+                        onClick={handleToggleCampaign}
+                        className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-colors ${
+                          campaignActive 
+                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
+                            : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                        }`}
+                      >
+                        {campaignActive ? 'Active' : 'Paused'}
+                      </button>
+                    </div>
 
-                  <p className="text-xs text-zinc-400 mt-2 leading-relaxed">
-                    Mint new tokens on the Stellar Asset Contract (SAC) directly into the Conduit Router contract vault to scale the active donor pool.
-                  </p>
-
-                  <form onSubmit={handleDeposit} className="mt-4 flex flex-col gap-4">
-                    <div>
-                      <label className="text-xs text-zinc-400 font-mono block">Funding Amount (USDC)</label>
-                      <div className="relative mt-1">
+                    <div className="mt-4 flex flex-col gap-4 text-xs">
+                      <div>
+                        <label className="text-[10px] text-zinc-500 font-mono block uppercase">Campaign Name</label>
                         <input 
-                          type="number" 
-                          value={depositAmount} 
-                          onChange={(e) => setDepositAmount(Number(e.target.value))}
-                          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-200 font-mono text-sm pr-16"
+                          type="text" 
+                          value={campaignName} 
+                          readOnly
+                          className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded py-2 px-3 focus:outline-none text-zinc-400 font-sans"
                         />
-                        <div className="absolute right-3 top-2.5 text-zinc-500 text-xs font-bold font-mono">USDC</div>
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-zinc-500 font-mono block uppercase">Registry Contract ID</label>
+                        <input 
+                          type="text" 
+                          value={registryContractId} 
+                          readOnly
+                          className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded py-2 px-3 focus:outline-none text-zinc-500 font-mono text-[10px]"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-zinc-500 font-mono block uppercase">USDC Wrapper SAC ID</label>
+                        <input 
+                          type="text" 
+                          value={assetTokenId} 
+                          readOnly
+                          className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded py-2 px-3 focus:outline-none text-zinc-500 font-mono text-[10px]"
+                        />
                       </div>
                     </div>
+                  </div>
 
-                    <button 
-                      type="submit"
-                      className="w-full bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white rounded-lg py-2.5 text-sm font-semibold transition-all duration-200 shadow-md shadow-indigo-600/10 flex items-center justify-center gap-2 font-mono"
-                    >
-                      Invoke SAC::mint
-                    </button>
-                  </form>
-                </div>
-
-                <div className="mt-4 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-xs text-zinc-500">
-                  <span>Direct vault custody</span>
-                  <span>SAC contract wrapper</span>
-                </div>
-              </div>
-
-            </section>
-
-            {/* Whitelisted NGO Database Panel */}
-            <section className="p-6 rounded-2xl bg-zinc-900/40 border border-zinc-800/70 shadow-lg">
-              <h3 className="font-bold text-zinc-100 border-b border-zinc-800 pb-3 flex items-center gap-2">
-                <svg className="w-5 h-5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                </svg>
-                Recipient Registry Whitelisted NGOs
-              </h3>
-
-              <div className="mt-4 overflow-x-auto">
-                <table className="w-full border-collapse text-left text-sm text-zinc-300">
-                  <thead>
-                    <tr className="border-b border-zinc-800 text-zinc-400 text-xs font-mono">
-                      <th className="py-2">NGO Name</th>
-                      <th className="py-2">Stellar Address</th>
-                      <th className="py-2">Category</th>
-                      <th className="py-2">Status</th>
-                      <th className="py-2 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-800/50">
-                    {ngos.map((ngo) => (
-                      <tr key={ngo.address} className="hover:bg-zinc-800/20 transition-colors">
-                        <td className="py-3 font-semibold text-zinc-100">{ngo.name}</td>
-                        <td className="py-3 font-mono text-zinc-400 text-xs">
-                          {formatStellarAddress(ngo.address)}
-                        </td>
-                        <td className="py-3 text-xs">
-                          <span className="px-2 py-0.5 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-300">
-                            {ngo.category}
-                          </span>
-                        </td>
-                        <td className="py-3">
-                          <span className="inline-flex items-center gap-1 text-emerald-400 text-xs font-semibold">
-                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                            {ngo.status}
-                          </span>
-                        </td>
-                        <td className="py-3 text-right">
-                          <button 
-                            onClick={() => handleRemoveWhitelist(ngo.address, ngo.name)}
-                            className="text-rose-400 hover:text-rose-300 text-xs font-medium hover:underline"
-                          >
-                            Revoke Whitelist
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                    {ngos.length === 0 && (
-                      <tr>
-                        <td colSpan={5} className="py-8 text-center text-zinc-500 font-mono text-xs">
-                          No NGOs whitelisted in the recipient_registry contract.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-
-          </div>
-
-          {/* Right Column - Actions & Execution Logs */}
-          <div className="flex flex-col gap-8">
-            
-            {/* Whitelist Recipient Registry Action */}
-            <section className="p-6 rounded-2xl bg-zinc-900/40 border border-zinc-800/70 shadow-lg">
-              <h3 className="font-bold text-zinc-100 border-b border-zinc-800 pb-3 flex items-center gap-2">
-                <svg className="w-5 h-5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
-                </svg>
-                Whitelist Recipient Authority
-              </h3>
-
-              <p className="text-xs text-zinc-400 mt-2 leading-relaxed">
-                Require Admin signatures to register new NGO public keys. Adds NGOs to registry database and emits <code className="font-mono text-indigo-400 bg-indigo-950/20 px-1 py-0.5 rounded text-[11px]">reg_ngo</code> event.
-              </p>
-
-              <form onSubmit={handleWhitelist} className="mt-4 flex flex-col gap-4 text-sm">
-                <div>
-                  <label className="text-xs text-zinc-400 font-mono block">NGO Public Key (Stellar Address)</label>
-                  <input 
-                    type="text" 
-                    value={newNGOAddress} 
-                    onChange={(e) => setNewNGOAddress(e.target.value)}
-                    placeholder="G..."
-                    className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-lg py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-300 font-mono text-xs"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs text-zinc-400 font-mono block">NGO/Charity Name</label>
-                  <input 
-                    type="text" 
-                    value={newNGOName} 
-                    onChange={(e) => setNewNGOName(e.target.value)}
-                    placeholder="e.g. Save The Oceans"
-                    className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-lg py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-200"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs text-zinc-400 font-mono block">Category</label>
-                  <select 
-                    value={newNGOCategory} 
-                    onChange={(e) => setNewNGOCategory(e.target.value)}
-                    className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-lg py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-200"
-                  >
-                    <option value="Clean Water">Clean Water & Sanitation</option>
-                    <option value="Medical Aid">Emergency Medical Care</option>
-                    <option value="Education">Education & Development</option>
-                    <option value="Environment">Environmental Preservation</option>
-                  </select>
-                </div>
-
-                <button 
-                  type="submit"
-                  className="w-full bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg py-2.5 text-sm font-semibold transition-all duration-200 font-mono"
-                >
-                  Whitelist Recipient
-                </button>
-              </form>
-            </section>
-
-            {/* Trigger Disbursement Action */}
-            <section className="p-6 rounded-2xl bg-zinc-900/40 border border-zinc-800/70 shadow-lg">
-              <h3 className="font-bold text-zinc-100 border-b border-zinc-800 pb-3 flex items-center gap-2">
-                <svg className="w-5 h-5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-                Trigger Aid Disbursement
-              </h3>
-
-              <p className="text-xs text-zinc-400 mt-2 leading-relaxed">
-                Triggers programmatic cross-contract checks to verify if the recipient is whitelisted in registry. If true, routes SAC token balance.
-              </p>
-
-              <form onSubmit={handleDisburseAid} className="mt-4 flex flex-col gap-4 text-sm">
-                <div>
-                  <label className="text-xs text-zinc-400 font-mono block">Select Recipient NGO</label>
-                  <select 
-                    value={disburseNGOAddress} 
-                    onChange={(e) => setDisburseNGOAddress(e.target.value)}
-                    className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-lg py-2.5 px-3 focus:outline-none focus:border-indigo-500 text-zinc-200"
-                  >
-                    {ngos.map((ngo) => (
-                      <option key={ngo.address} value={ngo.address}>
-                        {ngo.name} ({formatStellarAddress(ngo.address)})
-                      </option>
-                    ))}
-                    <option value="GCAIDUNKNOWNCHARITYADDRESS999999XX">Unverified Charity (Mock Test Fail)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-xs text-zinc-400 font-mono block">Disbursement Amount (USDC)</label>
-                  <div className="relative mt-1">
-                    <input 
-                      type="number" 
-                      value={disburseAmount} 
-                      onChange={(e) => setDisburseAmount(Number(e.target.value))}
-                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-200 font-mono text-sm pr-16"
-                    />
-                    <div className="absolute right-3 top-2.5 text-zinc-500 text-xs font-bold font-mono">USDC</div>
+                  <div className="mt-6 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-[10px] text-zinc-500 font-mono">
+                    <span>Admin Address:</span>
+                    <span>{formatStellarAddress(adminAddress)}</span>
                   </div>
                 </div>
 
-                <button 
-                  type="submit"
-                  className="w-full bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white rounded-lg py-2.5 text-sm font-semibold transition-all duration-200 shadow-md shadow-indigo-600/10 flex items-center justify-center gap-2 font-mono"
-                >
-                  Invoke disburse_aid
-                </button>
-              </form>
-            </section>
+                {/* Pool Funding */}
+                <div className="p-6 rounded bg-zinc-900/20 border border-zinc-800 flex flex-col justify-between">
+                  <div>
+                    <h3 className="font-bold text-sm text-zinc-100 border-b border-zinc-800 pb-3 flex items-center gap-2 uppercase tracking-wider font-mono">
+                      Funding Pool Deposit
+                    </h3>
+                    <p className="text-xs text-zinc-400 mt-2 leading-relaxed">
+                      Mint tokens on the Stellar Asset Contract (SAC) directly into the router contract vault to deposit donor capital.
+                    </p>
 
-            {/* Soroban Live Terminal Logs */}
-            <section className="p-6 rounded-2xl bg-zinc-950 border border-zinc-800/80 shadow-2xl flex-1 flex flex-col justify-between">
-              <div>
-                <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-                  <h3 className="font-bold text-zinc-300 flex items-center gap-2 text-sm font-mono">
-                    <span className="h-2 w-2 rounded-full bg-indigo-500 animate-pulse" />
-                    Soroban VM Console
-                  </h3>
+                    <form onSubmit={handleDeposit} className="mt-4 flex flex-col gap-4">
+                      <div>
+                        <label className="text-[10px] text-zinc-500 font-mono block uppercase">Funding Amount</label>
+                        <div className="relative mt-1">
+                          <input 
+                            type="number" 
+                            value={depositAmount} 
+                            onChange={(e) => setDepositAmount(Number(e.target.value))}
+                            className="w-full bg-zinc-950 border border-zinc-800 rounded py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-200 font-mono text-xs pr-16"
+                          />
+                          <div className="absolute right-3 top-2.5 text-zinc-500 text-[10px] font-bold font-mono">USDC</div>
+                        </div>
+                      </div>
+
+                      <button 
+                        type="submit"
+                        className="w-full bg-indigo-600 hover:bg-indigo-500 text-white rounded py-2 text-xs font-bold transition-colors font-mono uppercase tracking-wide"
+                      >
+                        Invoke SAC::mint
+                      </button>
+                    </form>
+                  </div>
+
+                  <div className="mt-4 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-[10px] text-zinc-500 font-mono">
+                    <span>Custodied Vault:</span>
+                    <span>{vaultBalance.toLocaleString()} USDC</span>
+                  </div>
+                </div>
+
+              </div>
+
+              {/* NGO Whitelist Table */}
+              <section className="p-6 rounded bg-zinc-900/20 border border-zinc-800">
+                <h3 className="font-bold text-sm text-zinc-100 border-b border-zinc-800 pb-3 flex items-center gap-2 uppercase tracking-wider font-mono">
+                  Registry Whitelisted Recipients
+                </h3>
+
+                <div className="mt-4 overflow-x-auto">
+                  <table className="w-full border-collapse text-left text-xs text-zinc-300">
+                    <thead>
+                      <tr className="border-b border-zinc-800 text-zinc-500 font-mono uppercase text-[9px]">
+                        <th className="py-2">NGO Name</th>
+                        <th className="py-2">Stellar Address</th>
+                        <th className="py-2">Category</th>
+                        <th className="py-2">Status</th>
+                        <th className="py-2 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-800/50">
+                      {ngos.map((ngo) => (
+                        <tr key={ngo.address} className="hover:bg-zinc-900/40 transition-colors">
+                          <td className="py-3 font-semibold text-zinc-200">{ngo.name}</td>
+                          <td className="py-3 font-mono text-zinc-400">
+                            {formatStellarAddress(ngo.address)}
+                          </td>
+                          <td className="py-3">
+                            <span className="px-2 py-0.5 rounded bg-zinc-950 border border-zinc-800 text-zinc-400">
+                              {ngo.category}
+                            </span>
+                          </td>
+                          <td className="py-3">
+                            <span className="inline-flex items-center gap-1 text-emerald-400 font-semibold font-mono">
+                              <span className="h-1 w-1 rounded-full bg-emerald-400" />
+                              {ngo.status}
+                            </span>
+                          </td>
+                          <td className="py-3 text-right">
+                            <button 
+                              onClick={() => handleRemoveWhitelist(ngo.address, ngo.name)}
+                              className="text-rose-400 hover:text-rose-300 font-mono hover:underline"
+                            >
+                              Revoke
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {ngos.length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="py-8 text-center text-zinc-600 font-mono">
+                            No whitelisted NGO recipients in contract registry.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+            </div>
+
+            {/* Right Column - Actions & Terminal Logs */}
+            <div className="flex flex-col gap-8">
+              
+              {/* Whitelist Form */}
+              <section className="p-6 rounded bg-zinc-900/20 border border-zinc-800">
+                <h3 className="font-bold text-sm text-zinc-100 border-b border-zinc-800 pb-3 flex items-center gap-2 uppercase tracking-wider font-mono">
+                  Register Recipient
+                </h3>
+
+                <form onSubmit={handleWhitelist} className="mt-4 flex flex-col gap-4 text-xs">
+                  <div>
+                    <label className="text-[10px] text-zinc-500 font-mono block uppercase">Stellar Address (56 chars)</label>
+                    <input 
+                      type="text" 
+                      value={newNGOAddress} 
+                      onChange={(e) => setNewNGOAddress(e.target.value)}
+                      placeholder="G..."
+                      className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-300 font-mono text-[10px]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] text-zinc-500 font-mono block uppercase">Charity Name</label>
+                    <input 
+                      type="text" 
+                      value={newNGOName} 
+                      onChange={(e) => setNewNGOName(e.target.value)}
+                      placeholder="e.g. Save The Oceans"
+                      className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-200"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] text-zinc-500 font-mono block uppercase">Category</label>
+                    <select 
+                      value={newNGOCategory} 
+                      onChange={(e) => setNewNGOCategory(e.target.value)}
+                      className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-200"
+                    >
+                      <option value="Clean Water">Clean Water & Sanitation</option>
+                      <option value="Medical Aid">Emergency Medical Care</option>
+                      <option value="Education">Education & Development</option>
+                      <option value="Environment">Environmental Preservation</option>
+                    </select>
+                  </div>
+
                   <button 
-                    onClick={() => setTerminalLogs([])}
-                    className="text-zinc-500 hover:text-zinc-400 font-mono text-[10px] uppercase border border-zinc-800 px-2 py-0.5 rounded"
+                    type="submit"
+                    className="w-full bg-indigo-600 hover:bg-indigo-500 text-white rounded py-2 text-xs font-bold transition-colors font-mono uppercase tracking-wide"
                   >
-                    Clear
+                    Whitelist NGO
                   </button>
-                </div>
+                </form>
+              </section>
 
-                <div className="mt-4 font-mono text-[11px] text-indigo-300 leading-relaxed max-h-[220px] overflow-y-auto flex flex-col gap-1.5">
-                  {terminalLogs.map((log, index) => (
-                    <div key={index} className="border-l border-zinc-800/60 pl-2 text-zinc-400">
-                      {log}
+              {/* Disbursement Trigger */}
+              <section className="p-6 rounded bg-zinc-900/20 border border-zinc-800">
+                <h3 className="font-bold text-sm text-zinc-100 border-b border-zinc-800 pb-3 flex items-center gap-2 uppercase tracking-wider font-mono">
+                  Trigger Disburse
+                </h3>
+
+                <form onSubmit={handleDisburseAid} className="mt-4 flex flex-col gap-4 text-xs">
+                  <div>
+                    <label className="text-[10px] text-zinc-500 font-mono block uppercase">NGO Recipient</label>
+                    <select 
+                      value={disburseNGOAddress} 
+                      onChange={(e) => setDisburseNGOAddress(e.target.value)}
+                      className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-200"
+                    >
+                      {ngos.map((ngo) => (
+                        <option key={ngo.address} value={ngo.address}>
+                          {ngo.name} ({formatStellarAddress(ngo.address)})
+                        </option>
+                      ))}
+                      <option value="GCAIDUNKNOWNCHARITYADDRESS999999XX">Unverified Charity Address (Test Failure)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] text-zinc-500 font-mono block uppercase">Disbursement Amount</label>
+                    <div className="relative mt-1">
+                      <input 
+                        type="number" 
+                        value={disburseAmount} 
+                        onChange={(e) => setDisburseAmount(Number(e.target.value))}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded py-2 px-3 focus:outline-none focus:border-indigo-500 text-zinc-200 font-mono text-xs pr-16"
+                      />
+                      <div className="absolute right-3 top-2.5 text-zinc-500 text-[10px] font-bold font-mono">USDC</div>
                     </div>
-                  ))}
-                  {terminalLogs.length === 0 && (
-                    <div className="text-zinc-600 text-center py-8">Console output is empty.</div>
-                  )}
-                </div>
-              </div>
+                  </div>
 
-              <div className="mt-6 pt-3 border-t border-zinc-800 text-[10px] text-zinc-500 flex justify-between font-mono">
-                <span>Network: Localhost-Sandbox</span>
-                <span>Ledger: #451298</span>
-              </div>
-            </section>
+                  <button 
+                    type="submit"
+                    className="w-full bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white rounded py-2 text-xs font-bold transition-colors shadow shadow-indigo-600/10 flex items-center justify-center gap-2 font-mono uppercase tracking-wide"
+                  >
+                    disburse_aid (Sign)
+                  </button>
+                </form>
+              </section>
+
+              {/* Soroban Sandbox Console */}
+              <section className="p-6 rounded bg-zinc-950 border border-zinc-850 flex flex-col justify-between flex-1">
+                <div>
+                  <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+                    <h3 className="font-bold text-zinc-400 flex items-center gap-2 text-xs font-mono uppercase tracking-wider">
+                      <span className="h-1.5 w-1.5 rounded-full bg-indigo-500 animate-pulse" />
+                      Soroban VM Console
+                    </h3>
+                    <button 
+                      onClick={() => setTerminalLogs([])}
+                      className="text-zinc-500 hover:text-zinc-400 font-mono text-[9px] uppercase border border-zinc-800 px-2 py-0.5 rounded"
+                    >
+                      Clear
+                    </button>
+                  </div>
+
+                  <div className="mt-4 font-mono text-[10px] text-zinc-400 leading-relaxed max-h-[180px] overflow-y-auto flex flex-col gap-1.5">
+                    {terminalLogs.map((log, index) => (
+                      <div key={index} className="border-l border-zinc-800 pl-2">
+                        {log}
+                      </div>
+                    ))}
+                    {terminalLogs.length === 0 && (
+                      <div className="text-zinc-700 text-center py-6">Console buffer empty.</div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-6 pt-3 border-t border-zinc-800 text-[9px] text-zinc-500 flex justify-between font-mono">
+                  <span>Network: Testnet</span>
+                  <span>Auto-Polling Active</span>
+                </div>
+              </section>
+
+            </div>
 
           </div>
 
-        </main>
-      )}
-
-      {/* Transaction & Audit Ledger */}
-      {!ui.isLoading && (
-        <section className="max-w-7xl mx-auto px-6 mt-8">
-          <div className="p-6 rounded-2xl bg-zinc-900/40 border border-zinc-800/70 shadow-lg">
-            <h3 className="font-bold text-zinc-100 border-b border-zinc-800 pb-3 flex items-center gap-2">
-              <svg className="w-5 h-5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              Audit Ledger & Event Log
+          {/* Audit Ledger List */}
+          <section className="p-6 rounded bg-zinc-900/20 border border-zinc-800">
+            <h3 className="font-bold text-sm text-zinc-100 border-b border-zinc-800 pb-3 flex items-center gap-2 uppercase tracking-wider font-mono">
+              Audit Ledger & Event Logs
             </h3>
 
-            <div className="mt-4 overflow-x-auto">
-              <table className="w-full border-collapse text-left text-sm text-zinc-300">
+            <div className="mt-4 overflow-x-auto font-sans">
+              <table className="w-full border-collapse text-left text-xs text-zinc-300">
                 <thead>
-                  <tr className="border-b border-zinc-800 text-zinc-400 text-xs font-mono">
+                  <tr className="border-b border-zinc-800 text-zinc-500 font-mono uppercase text-[9px]">
                     <th className="py-2">Timestamp</th>
                     <th className="py-2">Action Type</th>
                     <th className="py-2">Status</th>
@@ -777,35 +892,36 @@ export default function Home() {
                 </thead>
                 <tbody className="divide-y divide-zinc-800/50">
                   {auditLogs.map((log) => (
-                    <tr key={log.id} className="hover:bg-zinc-800/20 transition-colors">
-                      <td className="py-3 text-xs text-zinc-400 font-mono">{log.timestamp}</td>
+                    <tr key={log.id} className="hover:bg-zinc-900/40 transition-colors">
+                      <td className="py-3 text-zinc-500 font-mono">{log.timestamp}</td>
                       <td className="py-3">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${
-                          log.type === 'WHITELIST' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' :
-                          log.type === 'DISBURSE' ? 'bg-violet-500/10 text-violet-400 border border-violet-500/20' :
-                          log.type === 'DEPOSIT' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' :
-                          log.type === 'REMOVE_WHITELIST' ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20' :
-                          'bg-zinc-500/10 text-zinc-400 border border-zinc-500/20'
+                        <span className={`px-2 py-0.5 rounded text-[9px] font-bold font-mono border ${
+                          log.type === 'WHITELIST' ? 'bg-zinc-950 text-indigo-400 border-indigo-500/20' :
+                          log.type === 'DISBURSE' ? 'bg-zinc-950 text-violet-400 border-violet-500/20' :
+                          log.type === 'DEPOSIT' ? 'bg-zinc-950 text-amber-400 border-amber-500/20' :
+                          log.type === 'REMOVE_WHITELIST' ? 'bg-zinc-950 text-rose-400 border-rose-500/20' :
+                          'bg-zinc-950 text-zinc-400 border-zinc-800'
                         }`}>
                           {log.type}
                         </span>
                       </td>
-                      <td className="py-3 text-xs">
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      <td className="py-3">
+                        <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold ${
                           log.status === 'SUCCESS' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'
                         }`}>
                           {log.status}
                         </span>
                       </td>
-                      <td className="py-3 text-xs text-zinc-300">{log.details}</td>
-                      <td className="py-3 text-right font-mono text-zinc-500 text-xs">{log.txHash}</td>
+                      <td className="py-3 text-zinc-300">{log.details}</td>
+                      <td className="py-3 text-right font-mono text-zinc-500">{log.txHash}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-          </div>
-        </section>
+          </section>
+
+        </main>
       )}
 
     </div>
