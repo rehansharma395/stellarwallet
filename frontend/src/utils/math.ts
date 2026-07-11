@@ -34,7 +34,7 @@ export function stroopsToUnits(stroops: bigint | string | number): number {
  */
 export function unitsToStroops(units: number): bigint {
   if (isNaN(units) || units < 0) {
-    return 0n;
+    return BigInt(0);
   }
   return BigInt(Math.round(units * 10_000_000));
 }
