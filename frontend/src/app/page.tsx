@@ -34,8 +34,8 @@ export default function Home() {
 
   // App simulated states matching the Rust contract configurations
   const [adminAddress] = useState<string>('GDCONDUITADMINXXYTWENTYTWOSIXMARKETINGVAULTXX55566677722');
-  const [registryContractId, setRegistryContractId] = useState<string>('GDREGISTRYCONTRACTID5591283749129990001112223334445556');
-  const [assetTokenId, setAssetTokenId] = useState<string>('GDUSDCASSETTOKENIDWRAPPERSAC0011122233344455566677788');
+  const [registryContractId, setRegistryContractId] = useState<string>('CCDMRCGEXGRMM2JYED27C7S62UKISLXXTMRNKXRBFNVSANB7QGX4ZVDV');
+  const [assetTokenId, setAssetTokenId] = useState<string>('CAJ2ELOFEDQSGTASFIZH7JTQIVHYN44RLPV6AUARHFVIB4UHH3TSATLA');
   const [campaignName, setCampaignName] = useState<string>('Global Clean Water Initiative');
   const [campaignActive, setCampaignActive] = useState<boolean>(true);
   
