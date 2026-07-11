@@ -18,6 +18,7 @@ dependencies = [
 name = "aid_router"
 version = "0.0.0"
 dependencies = [
+ "recipient_registry",
  "soroban-sdk",
 ]
 
