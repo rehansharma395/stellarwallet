@@ -2,6 +2,8 @@
 
 Conduit is a production-grade programmatic micro-aid routing platform implemented on Stellar Soroban and Next.js 15. It utilizes dynamic, dual-contract architectures to custody donor pools and execute secure cross-contract NGO whitelist verification cycles.
 
+[![Live Demo](https://img.shields.io/badge/Demo-Live%20App-orange?style=for-the-badge&logo=cloudflare&logoColor=white)](https://stellarwallet.adityaboora2910.workers.dev/)
+
 ---
 
 ### 1. Project Overview & Production Architecture
