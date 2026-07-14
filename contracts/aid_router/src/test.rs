@@ -5,24 +5,24 @@ extern crate std;
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Events},
-    token, Address, Env, IntoVal, String, Symbol, FromVal,
+    token, Address, Env, FromVal, String, Symbol,
 };
 
 // Import RecipientRegistryContract from the recipient_registry package dependency
-use recipient_registry::{
-    RecipientRegistryContract, RecipientRegistryContractClient,
-};
+use recipient_registry::{RecipientRegistryContract, RecipientRegistryContractClient};
 
-fn setup_test<'a>(env: &'a Env) -> (
-    Address, // admin
-    Address, // user
-    Address, // ngo
-    Address, // registry contract id
+fn setup_test<'a>(
+    env: &'a Env,
+) -> (
+    Address,                             // admin
+    Address,                             // user
+    Address,                             // ngo
+    Address,                             // registry contract id
     RecipientRegistryContractClient<'a>, // registry client
-    Address, // asset token id
-    token::Client<'a>, // token client
-    Address, // router contract id
-    AidRouterContractClient<'a>, // router client
+    Address,                             // asset token id
+    token::Client<'a>,                   // token client
+    Address,                             // router contract id
+    AidRouterContractClient<'a>,         // router client
 ) {
     env.mock_all_auths();
 
@@ -36,7 +36,8 @@ fn setup_test<'a>(env: &'a Env) -> (
     registry_client.initialize(&admin);
 
     // Register token contract (SAC)
-    let asset_token_id = env.register_stellar_asset_contract(admin.clone());
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let asset_token_id = sac.address();
     let token_client = token::Client::new(env, &asset_token_id);
 
     // Register router contract
@@ -67,7 +68,7 @@ fn test_initialization() {
     assert_eq!(router.get_admin(), admin);
     assert_eq!(router.get_registry(), registry_id);
     assert_eq!(router.get_asset(), asset_id);
-    assert_eq!(router.get_campaign_active(), true);
+    assert!(router.get_campaign_active());
     assert_eq!(router.get_campaign_name(), campaign_name);
 }
 
@@ -110,7 +111,8 @@ fn test_payout_success() {
     registry.initialize(&admin);
 
     // Register token contract (SAC)
-    let asset_token_id = env.register_stellar_asset_contract(admin.clone());
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let asset_token_id = sac.address();
     let token = token::Client::new(&env, &asset_token_id);
 
     // Register router contract
@@ -118,11 +120,16 @@ fn test_payout_success() {
     let router = AidRouterContractClient::new(&env, &router_contract_id);
 
     let campaign_name = String::from_str(&env, "Global Aid Campaign");
-    router.initialize(&admin, &registry_contract_id, &asset_token_id, &campaign_name);
+    router.initialize(
+        &admin,
+        &registry_contract_id,
+        &asset_token_id,
+        &campaign_name,
+    );
 
     // Whitelist NGO
     registry.whitelist_recipient(&ngo);
-    assert_eq!(registry.validate_recipient(&ngo), true);
+    assert!(registry.validate_recipient(&ngo));
 
     // Mint some tokens to router using StellarAssetClient
     let sac_client = token::StellarAssetClient::new(&env, &asset_token_id);
@@ -143,9 +150,9 @@ fn test_payout_success() {
     let mut disburse_event_found = false;
     for event in events.iter() {
         let topics = event.1;
-        if topics.len() > 0 {
+        if !topics.is_empty() {
             let sym = Symbol::from_val(&env, &topics.get(0).unwrap());
-            if sym == Symbol::short("disburse") {
+            if sym == Symbol::new(&env, "disburse") {
                 disburse_event_found = true;
             }
         }
@@ -160,7 +167,8 @@ fn test_non_admin_auth_fault() {
     // Do NOT mock all auths initially to let signature check fail
     let admin = Address::generate(&env);
     let registry_id = env.register(RecipientRegistryContract, ());
-    let asset_id = env.register_stellar_asset_contract(admin.clone());
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let asset_id = sac.address();
     let router_id = env.register(AidRouterContract, ());
     let router = AidRouterContractClient::new(&env, &router_id);
 
@@ -174,7 +182,8 @@ fn test_non_admin_auth_fault() {
 #[test]
 fn test_exceeds_available_balance() {
     let env = Env::default();
-    let (admin, _, ngo, registry_id, registry, asset_id, token, router_id, router) = setup_test(&env);
+    let (admin, _, ngo, registry_id, registry, asset_id, token, router_id, router) =
+        setup_test(&env);
     let campaign_name = String::from_str(&env, "Global Aid Campaign");
 
     router.initialize(&admin, &registry_id, &asset_id, &campaign_name);
@@ -199,18 +208,18 @@ fn test_exceeds_available_balance() {
 #[test]
 fn test_inactive_campaign_fails() {
     let env = Env::default();
-    let (admin, _, ngo, registry_id, registry, asset_id, token, router_id, router) = setup_test(&env);
+    let (admin, _, ngo, registry_id, registry, asset_id, _, router_id, router) = setup_test(&env);
     let campaign_name = String::from_str(&env, "Global Aid Campaign");
 
     router.initialize(&admin, &registry_id, &asset_id, &campaign_name);
     registry.whitelist_recipient(&ngo);
-    
+
     let sac_client = token::StellarAssetClient::new(&env, &asset_id);
     sac_client.mint(&router_id, &500);
 
     // Set campaign inactive
     router.update_campaign_active(&false);
-    assert_eq!(router.get_campaign_active(), false);
+    assert!(!router.get_campaign_active());
 
     // Disburse aid should fail
     let res = router.try_disburse_aid(&ngo, &200);

@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/set-state-in-effect, react-hooks/purity, @typescript-eslint/no-explicit-any */
 'use client';
 
 import React, { useState, useEffect } from 'react';
@@ -42,9 +43,9 @@ export default function Home() {
 
   // App simulated states matching the Rust contract configurations
   const [adminAddress] = useState<string>('GDCONDUITADMINXXYTWENTYTWOSIXMARKETINGVAULTXX55566677722');
-  const [registryContractId, setRegistryContractId] = useState<string>('CCDMRCGEXGRMM2JYED27C7S62UKISLXXTMRNKXRBFNVSANB7QGX4ZVDV');
-  const [assetTokenId, setAssetTokenId] = useState<string>('CAJ2ELOFEDQSGTASFIZH7JTQIVHYN44RLPV6AUARHFVIB4UHH3TSATLA');
-  const [campaignName, setCampaignName] = useState<string>('Global Clean Water Initiative');
+  const [registryContractId] = useState<string>('CCDMRCGEXGRMM2JYED27C7S62UKISLXXTMRNKXRBFNVSANB7QGX4ZVDV');
+  const [assetTokenId] = useState<string>('CAJ2ELOFEDQSGTASFIZH7JTQIVHYN44RLPV6AUARHFVIB4UHH3TSATLA');
+  const [campaignName] = useState<string>('Global Clean Water Initiative');
   const [campaignActive, setCampaignActive] = useState<boolean>(true);
   
   // Vault Pools & Counter Centerpiece
@@ -74,6 +75,10 @@ export default function Home() {
     'Synced with contract: recipient_registry (validated: true)',
     'Synced with contract: aid_router (validated: true)',
   ]);
+
+  const addTerminalLog = (line: string) => {
+    setTerminalLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${line}`]);
+  };
 
   // Audit Logs
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([
@@ -116,7 +121,7 @@ export default function Home() {
   };
 
   // SWR Event Polling Loop (polls every 6 seconds)
-  const { data: rpcData, error: rpcError } = useSWR(
+  const { error: rpcError } = useSWR(
     'https://soroban-testnet.stellar.org',
     rpcEventsFetcher,
     {
@@ -154,9 +159,7 @@ export default function Home() {
     }
   }, [ui.toast]);
 
-  const addTerminalLog = (line: string) => {
-    setTerminalLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${line}`]);
-  };
+
 
   // Connect wallet method via StellarWalletsKit
   const handleConnectWallet = async () => {

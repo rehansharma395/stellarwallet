@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec, Address, Env, String, Symbol,
-    IntoVal,
+    contract, contracterror, contractimpl, contracttype, token, vec, Address, Env, IntoVal, String,
+    Symbol,
 };
 
 #[contracterror]
@@ -42,10 +42,18 @@ impl AidRouterContract {
             return Err(Error::AlreadyInitialized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::RegistryContractId, &registry_contract_id);
-        env.storage().instance().set(&DataKey::AssetTokenId, &asset_token_id);
-        env.storage().instance().set(&DataKey::CampaignActive, &true);
-        env.storage().instance().set(&DataKey::CampaignName, &campaign_name);
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistryContractId, &registry_contract_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::AssetTokenId, &asset_token_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::CampaignActive, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::CampaignName, &campaign_name);
         Ok(())
     }
 
@@ -54,13 +62,25 @@ impl AidRouterContract {
             return Err(Error::NotInitialized);
         }
 
-        let active: bool = env.storage().instance().get(&DataKey::CampaignActive).unwrap_or(false);
+        let active: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::CampaignActive)
+            .unwrap_or(false);
         if !active {
             return Err(Error::CampaignInactive);
         }
 
-        let registry_contract_id: Address = env.storage().instance().get(&DataKey::RegistryContractId).unwrap();
-        let asset_token_id: Address = env.storage().instance().get(&DataKey::AssetTokenId).unwrap();
+        let registry_contract_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistryContractId)
+            .unwrap();
+        let asset_token_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::AssetTokenId)
+            .unwrap();
 
         let target_ngo_addr = target_ngo.clone();
         let target_ngo = IntoVal::<Env, soroban_sdk::Val>::into_val(&target_ngo, &env);
@@ -77,7 +97,8 @@ impl AidRouterContract {
         }
 
         // 4. Gracefully block routing requests exceeding available pooled capital balances
-        let current_balance = token::Client::new(&env, &asset_token_id).balance(&env.current_contract_address());
+        let current_balance =
+            token::Client::new(&env, &asset_token_id).balance(&env.current_contract_address());
         if amount > current_balance {
             return Err(Error::InsufficientFunds);
         }
@@ -91,7 +112,11 @@ impl AidRouterContract {
 
         // 6. Emit a Soroban execution event tracking the recipient, amount, and timestamp
         env.events().publish(
-            (Symbol::short("disburse"), target_ngo_addr, env.ledger().timestamp()),
+            (
+                Symbol::new(&env, "disburse"),
+                target_ngo_addr,
+                env.ledger().timestamp(),
+            ),
             amount,
         );
 
@@ -100,45 +125,78 @@ impl AidRouterContract {
 
     // Parameter alteration routines requiring admin validation
     pub fn update_campaign_active(env: Env, active: bool) -> Result<(), Error> {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(Error::NotInitialized)?;
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
         admin.require_auth();
-        env.storage().instance().set(&DataKey::CampaignActive, &active);
+        env.storage()
+            .instance()
+            .set(&DataKey::CampaignActive, &active);
         Ok(())
     }
 
     pub fn update_registry(env: Env, new_registry: Address) -> Result<(), Error> {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(Error::NotInitialized)?;
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
         admin.require_auth();
-        env.storage().instance().set(&DataKey::RegistryContractId, &new_registry);
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistryContractId, &new_registry);
         Ok(())
     }
 
     pub fn update_asset(env: Env, new_asset: Address) -> Result<(), Error> {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(Error::NotInitialized)?;
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
         admin.require_auth();
-        env.storage().instance().set(&DataKey::AssetTokenId, &new_asset);
+        env.storage()
+            .instance()
+            .set(&DataKey::AssetTokenId, &new_asset);
         Ok(())
     }
 
     // Getters for integration verification
     pub fn get_admin(env: Env) -> Result<Address, Error> {
-        env.storage().instance().get(&DataKey::Admin).ok_or(Error::NotInitialized)
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)
     }
 
     pub fn get_registry(env: Env) -> Result<Address, Error> {
-        env.storage().instance().get(&DataKey::RegistryContractId).ok_or(Error::NotInitialized)
+        env.storage()
+            .instance()
+            .get(&DataKey::RegistryContractId)
+            .ok_or(Error::NotInitialized)
     }
 
     pub fn get_asset(env: Env) -> Result<Address, Error> {
-        env.storage().instance().get(&DataKey::AssetTokenId).ok_or(Error::NotInitialized)
+        env.storage()
+            .instance()
+            .get(&DataKey::AssetTokenId)
+            .ok_or(Error::NotInitialized)
     }
 
     pub fn get_campaign_active(env: Env) -> Result<bool, Error> {
-        env.storage().instance().get(&DataKey::CampaignActive).ok_or(Error::NotInitialized)
+        env.storage()
+            .instance()
+            .get(&DataKey::CampaignActive)
+            .ok_or(Error::NotInitialized)
     }
 
     pub fn get_campaign_name(env: Env) -> Result<String, Error> {
-        env.storage().instance().get(&DataKey::CampaignName).ok_or(Error::NotInitialized)
+        env.storage()
+            .instance()
+            .get(&DataKey::CampaignName)
+            .ok_or(Error::NotInitialized)
     }
 }
 
