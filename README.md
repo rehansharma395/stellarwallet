@@ -113,7 +113,7 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
    Duration  208ms (transform 71ms, setup 0ms, import 96ms, tests 6ms, environment 0ms)
 ```
 
-`[INSERT PIPELINE EXECUTION SUCCESS SCREENSHOT HERE]`
+![Pipeline Execution Success](.github/workflows/media/Screenshot%202026-07-14%20at%2011.02.20%E2%80%AFAM.png)
 
 ---
 
@@ -121,10 +121,19 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 The Next.js 15 control center features full layout responsive breakpoints.
 
-`[INSERT DESKTOP SAAS DASHBOARD MOCK HERE]`
-`[INSERT MOBILE RESPONSIVE UI MOCK HERE]`
+#### Desktop Control Center & Live Demo
+![Desktop SaaS Dashboard Mock](.github/workflows/media/image.png)
+
+![Conduit Live Demo GIF](.github/workflows/media/recording.gif)
+
+#### Mobile Control Center Layouts
+<p align="center">
+  <img src=".github/workflows/media/IMG_4516.png" width="32%" alt="Mobile UI 1" />
+  <img src=".github/workflows/media/IMG_4517.png" width="32%" alt="Mobile UI 2" />
+  <img src=".github/workflows/media/IMG_4518.png" width="32%" alt="Mobile UI 3" />
+</p>
 
 ---
 
 ### 🚀 Production Hosting URL
-- **Production Server Link**: `[PENDING — GENERATE AFTER DEPLOYMENT]`
+- **Production Server Link**: [https://stellarwallet.adityaboora2910.workers.dev/](https://stellarwallet.adityaboora2910.workers.dev/)
