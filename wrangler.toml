@@ -1,0 +1,8 @@
+name = "stellarwallet"
+compatibility_date = "2026-07-13"
+
+[assets]
+directory = "./out"
+
+[build]
+command = "npm run build"
